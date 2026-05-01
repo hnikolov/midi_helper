@@ -1,0 +1,670 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>MIDI (USB/BLE) – Send & Receive PC, CC & SysEx + THR10-II Activation</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#1a1a1a" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./icons/icon-192.svg" type="image/svg+xml" />
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      max-width: 900px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      line-height: 1.5;
+    }
+    h1 { font-size: 1.4rem; }
+    fieldset { border: 1px solid #888; border-radius: 8px; padding: 1rem; }
+    label { display: inline-block; min-width: 7rem; }
+    input[type="number"] { width: 6rem; }
+    input[type="text"] { width: 100%; }
+    button { padding: 0.5rem 0.8rem; margin: 0.25rem; }
+    #status { margin: 0.5rem 0; font-weight: 600; }
+    #log {
+      margin-top: 1rem;
+      background: rgba(0,0,0,0.06);
+      border-radius: 8px;
+      padding: 0.75rem;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      max-height: 420px;
+      overflow: auto;
+      white-space: pre-wrap;
+    }
+    .row { margin: 0.5rem 0; }
+    .chip {
+      display: inline-block;
+      padding: 0.25rem 0.5rem;
+      border-radius: 999px;
+      background: rgba(0,0,0,0.1);
+      font-size: 0.85rem;
+      margin-left: 0.5rem;
+    }
+    .small { opacity: 0.8; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <h1>MIDI (USB/BLE) – Program Change, Control Change & SysEx Sender/Logger</h1>
+
+  <div class="row">
+    <button id="btnConnect">Connect</button>
+    <button id="btnDisconnect" disabled>Disconnect</button>
+    <span id="status" class="chip">Not connected</span>
+  </div>
+
+  <fieldset>
+    <legend>Send Program Change</legend>
+    <div class="row">
+      <label for="pc_channel">Channel</label>
+      <input id="pc_channel" type="number" min="1" max="16" value="1" />
+    </div>
+    <div class="row">
+      <label for="pc_program">Program</label>
+      <input id="pc_program" type="number" min="0" max="127" value="0" />
+      <span class="chip" title="Some devices are 1-based (1–128). This UI uses 0–127 per MIDI spec.">0–127</span>
+    </div>
+    <div class="row">
+      <button id="btnSendPC" disabled>Send Program Change</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Send Control Change (CC)</legend>
+    <div class="row">
+      <label for="cc_channel">Channel</label>
+      <input id="cc_channel" type="number" min="1" max="16" value="0" />
+    </div>
+    <div class="row">
+      <label for="cc_controller">Controller</label>
+      <input id="cc_controller" type="number" min="0" max="127" value="25" />
+    </div>
+    <div class="row">
+      <label for="cc_value">Value</label>
+      <input id="cc_value" type="number" min="0" max="127" value="1" />
+    </div>
+    <div class="row">
+      <button id="btnSendCC" disabled>Send Control Change</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Send SysEx</legend>
+    <div class="row">
+      <label for="sysex_hex">SysEx (hex)</label>
+      <input id="sysex_hex" type="text"
+             placeholder="Example: f0 00 01 0c 24 01 4d 00 02 00 00 03 28 72 4d 54 5d 00 00 00 f7" />
+    </div>
+    <div class="row">
+      <button id="btnSendSysEx" disabled>Send SysEx</button>
+    </div>
+    <div class="row small">
+      Tip: Enter a complete SysEx starting with <code>F0</code> and ending with <code>F7</code>. Spaces and case are ignored.
+    </div>
+  </fieldset>
+
+  <fieldset id="thr10iiCard" hidden>
+    <legend>THR10-II Activation</legend>
+    <div class="row small">
+      Sends the following SysEx sequence with 0.5s delay between messages:<br/>
+      1) Identity Request (Universal SysEx, non-real-time)<br/>
+      2) Ask Firmware Version (00-variant)<br/>
+      3) Header for magic key (4-byte frame follows)<br/>
+      4) 1.44.0a body with magic key
+    </div>
+    <div class="row">
+      <button id="btnActivateThr10ii" disabled>Activate THR10-II</button>
+      <button disabled aria-hidden="true" tabindex="-1" style="visibility:hidden;">Preset 0</button>
+      <button class="btnThrPreset" data-preset="0" disabled>Preset 1</button>
+      <button class="btnThrPreset" data-preset="1" disabled>Preset 2</button>
+      <button class="btnThrPreset" data-preset="2" disabled>Preset 3</button>
+      <button class="btnThrPreset" data-preset="3" disabled>Preset 4</button>
+      <button class="btnThrPreset" data-preset="4" disabled>Preset 5</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Device & Log</legend>
+    <div id="deviceInfo">Device: (none)</div>
+    <div id="log"></div>
+  </fieldset>
+
+  <script>
+    // --- BLE MIDI UUIDs (standard) ---
+    const MIDI_SERVICE_UUID = '03b80e5a-ede8-4b33-a751-6ce34ec4c700';
+    const MIDI_CHAR_UUID    = '7772e5db-3868-4112-a1a9-f2669d106bf3';
+
+    //const MIDI_SERVICE_UUID = "0000ffc0-0000-1000-8000-00805f9b34fb"; // Base Service Spark Go
+    //const MIDI_CHAR_UUID   = "0000ffc1-0000-1000-8000-00805f9b34fb";
+    //const NOTIFY_UUID  = "0000ffc2-0000-1000-8000-00805f9b34fb";
+        
+    // BLE handles
+    let bleDevice = null;
+    let bleServer = null;
+    let bleMidiService = null;
+    let bleMidiChar = null;
+
+    // USB Web MIDI handles
+    let midiAccess = null;
+    let midiOut = null; // selected MIDIOutput port
+    let midiIn = null;  // selected MIDIInput port
+
+    // SysEx assembly for BLE (can span multiple notifications)
+    let bleSysExBuffer = null; // array of bytes
+    let inBleSysEx = false;
+
+    // --- Logger & UI ---
+    function log(msg) {
+      const el = document.getElementById('log');
+      const time = new Date().toLocaleTimeString();
+      el.textContent += `[${time}] ${msg}\n`;
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function setStatus(text) {
+      document.getElementById('status').textContent = text;
+    }
+
+    function getConnectedDeviceNames() {
+      const names = [];
+      if (midiOut) names.push(midiOut.name || 'USB output');
+      if (midiIn && (!midiOut || midiIn.name !== midiOut.name)) {
+        names.push(midiIn.name || 'USB input');
+      }
+      if (bleDevice && bleMidiChar) names.push(bleDevice.name || 'BLE MIDI device');
+      return names;
+    }
+
+    function isThrConnected() {
+      return getConnectedDeviceNames().some(name => name.toLowerCase().includes('thr'));
+    }
+
+    function setUIConnected(connected) {
+      document.getElementById('btnConnect').disabled       = connected;
+      document.getElementById('btnDisconnect').disabled    = !connected;
+      document.getElementById('btnSendPC').disabled        = !connected;
+      document.getElementById('btnSendCC').disabled        = !connected;
+      document.getElementById('btnSendSysEx').disabled     = !connected;
+
+      const thrVisible = connected && isThrConnected();
+      document.getElementById('thr10iiCard').hidden = !thrVisible;
+      document.getElementById('btnActivateThr10ii').disabled = !thrVisible;
+      document.querySelectorAll('.btnThrPreset').forEach(btn => {
+        btn.disabled = !thrVisible;
+      });
+
+      if (connected) {
+        const names = getConnectedDeviceNames();
+        setStatus(`Connected: ${names.join(' | ') || 'Unknown device'}`);
+      } else {
+        setStatus('Not connected');
+      }
+    }
+
+    function isUsbConnected() {
+      return !!midiOut || !!midiIn;
+    }
+    function isBleConnected() {
+      return !!bleMidiChar;
+    }
+    function anyConnected() {
+      return isUsbConnected() || isBleConnected();
+    }
+
+    // --- Utilities ---
+    function toHex(bytes) {
+      return [...bytes].map(b => b.toString(16).padStart(2, '0')).join(' ');
+    }
+    function sleep(ms) {
+      return new Promise(res => setTimeout(res, ms));
+    }
+
+    // Decode common MIDI messages for USB input logging
+    function decodeMidiMessage(data) {
+      if (!data || data.length === 0) return 'Empty MIDI message';
+      const status = data[0];
+      const type = status & 0xF0;
+      const chan = (status & 0x0F) + 1;
+
+      if (status === 0xF0) {
+        return `SysEx (len=${data.length}): ${toHex(data)}`;
+      }
+      if (status === 0xF7) {
+        return `End of SysEx: ${toHex(data)}`;
+      }
+
+      switch (type) {
+        case 0x80: return `Note Off ch=${chan} note=${data[1]} vel=${data[2]}`;
+        case 0x90: return `Note On ch=${chan} note=${data[1]} vel=${data[2]}`;
+        case 0xA0: return `Poly Aftertouch ch=${chan} note=${data[1]} pressure=${data[2]}`;
+        case 0xB0: return `Control Change ch=${chan} cc=${data[1]} val=${data[2]}`;
+        case 0xC0: return `Program Change ch=${chan} program=${data[1]}`;
+        case 0xD0: return `Channel Aftertouch ch=${chan} pressure=${data[1]}`;
+        case 0xE0: {
+          const value = (data[2] << 7) | data[1];
+          return `Pitch Bend ch=${chan} value=${value}`;
+        }
+        default:
+          if (status >= 0xF0) return `System Message ${toHex(data)}`;
+          return `Unknown MIDI: ${toHex(data)}`;
+      }
+    }
+
+    // --- BLE MIDI Packet Helpers ---
+    function buildBleMidiPacket(midiBytes) {
+      // Timestamp: 13-bit value; we include two timestamp bytes with MSB=1.
+      const ts = Math.floor(performance.now()) % 8192;
+      const tsHigh = 0x80 | (ts >> 7);
+      const tsLow  = 0x80 | (ts & 0x7F);
+      const packet = new Uint8Array(2 + midiBytes.length);
+      packet[0] = tsHigh;
+      packet[1] = tsLow;
+      packet.set(midiBytes, 2);
+      return packet;
+    }
+
+    // Chunk long MIDI payloads for BLE to avoid MTU issues.
+    async function sendBleChunked(midiBytes, chunkPayloadSize = 20) {
+      if (!bleMidiChar) throw new Error('Not connected to BLE MIDI characteristic.');
+      // chunkPayloadSize refers to MIDI payload size (excluding the 2 timestamp bytes).
+      for (let i = 0; i < midiBytes.length; i += chunkPayloadSize) {
+        const chunk = midiBytes.slice(i, i + chunkPayloadSize);
+        const packet = buildBleMidiPacket(chunk);
+        if (typeof bleMidiChar.writeValueWithoutResponse === 'function') {
+          await bleMidiChar.writeValueWithoutResponse(packet);
+        } else {
+          await bleMidiChar.writeValue(packet);
+        }
+      }
+    }
+
+    // --- MIDI Message Constructors ---
+    function makeProgramChange(channel, program) {
+      const ch = Math.max(1, Math.min(16, Number(channel)));
+      const pg = Math.max(0, Math.min(127, Number(program)));
+      const status = 0xC0 | (ch - 1);
+      return new Uint8Array([status, pg]);
+    }
+
+    function makeControlChange(channel, controller, value) {
+      const ch  = Math.max(1, Math.min(16, Number(channel)));
+      const cc  = Math.max(0, Math.min(127, Number(controller)));
+      const val = Math.max(0, Math.min(127, Number(value)));
+      const status = 0xB0 | (ch - 1);
+      return new Uint8Array([status, cc, val]);
+    }
+
+    // Parse SysEx hex string -> Uint8Array, validate starts F0 and ends F7
+    function parseSysExHex(hexStr) {
+      const cleaned = hexStr.replace(/[^0-9a-fA-F]/g, '').toLowerCase();
+      if (cleaned.length % 2 !== 0) throw new Error('Invalid hex string length.');
+      const bytes = new Uint8Array(cleaned.length / 2);
+      for (let i = 0; i < cleaned.length; i += 2) {
+        bytes[i / 2] = parseInt(cleaned.slice(i, i + 2), 16);
+      }
+      if (bytes.length < 2 || bytes[0] !== 0xF0 || bytes[bytes.length - 1] !== 0xF7) {
+        throw new Error('SysEx must start with F0 and end with F7.');
+      }
+      return bytes;
+    }
+
+    // --- Send over USB or BLE ---
+    async function sendMidiUniversal(midiBytes) {
+      if (isUsbConnected() && midiOut) {
+        midiOut.send(Array.from(midiBytes)); // at current time
+        log(`TX (USB): ${toHex(midiBytes)}`);
+      } else if (isBleConnected()) {
+        await sendBleChunked(midiBytes);
+        log(`TX (BLE): ${toHex(midiBytes)}`);
+      } else {
+        throw new Error('No MIDI output connected (USB or BLE).');
+      }
+    }
+
+    // --- Incoming BLE-MIDI (logging + SysEx reassembly) ---
+    function handleIncomingBle(event) {
+      const data = new Uint8Array(event.target.value.buffer);
+      const rawHex = toHex(data);
+      log(`RX (BLE raw): ${rawHex}`);
+
+      // SysEx assembly across multiple notifications
+      try {
+        for (let i = 0; i < data.length; i++) {
+          const b = data[i];
+
+          if (!inBleSysEx) {
+            if (b === 0xF0) {
+              inBleSysEx = true;
+              bleSysExBuffer = [0xF0];
+            }
+            // else ignore; could be timestamp or status for non-SysEx
+          } else {
+            if (b === 0xF7) {
+              bleSysExBuffer.push(0xF7);
+              const syx = new Uint8Array(bleSysExBuffer);
+              log(`RX (BLE SysEx): ${toHex(syx)} | len=${syx.length}`);
+              inBleSysEx = false;
+              bleSysExBuffer = null;
+            } else if (b < 0x80) {
+              bleSysExBuffer.push(b); // data byte
+            } else {
+              // MSB=1 inside SysEx is likely a BLE timestamp; ignore
+            }
+          }
+        }
+
+        // Log non-SysEx "quasi-MIDI" by removing the first two BLE timestamp bytes if present
+        if (!inBleSysEx && data.length >= 3) {
+          const b0 = data[0], b1 = data[1];
+          const likelyTs = ((b0 & 0x80) && (b1 & 0x80));
+          let midiGuess = data;
+          if (likelyTs) midiGuess = data.slice(2);
+          if (midiGuess.length > 0) {
+            log(`RX (BLE quasi-MIDI): ${toHex(midiGuess)}`);
+          }
+        }
+      } catch (e) {
+        log('BLE MIDI parse error: ' + e.message);
+      }
+    }
+
+    // --- USB (Web MIDI) Connection & Input Logging ---
+    async function tryConnectUsb() {
+      if (!navigator.requestMIDIAccess) {
+        log('Web MIDI API not supported in this browser.');
+        return false;
+      }
+      try {
+        // Request MIDI, including SysEx permission
+        midiAccess = await navigator.requestMIDIAccess({ sysex: true });
+      } catch (e) {
+        log('Web MIDI access denied or failed: ' + e.message);
+        return false;
+      }
+
+      const outputs = Array.from(midiAccess.outputs.values());
+      const inputs  = Array.from(midiAccess.inputs.values());
+
+      if (outputs.length === 0) {
+        log('No USB MIDI outputs found.');
+      }
+      if (inputs.length === 0) {
+        log('No USB MIDI inputs found (for receiving).');
+      }
+
+      if (outputs.length === 0 && inputs.length === 0) {
+        return false;
+      }
+
+      // Ask the user if they want to connect via USB
+      const outNames = outputs.map((o, idx) => `${idx}: ${o.name || 'Unnamed'} (${o.manufacturer || 'Unknown'})`);
+      const inNames  = inputs.map((i, idx)  => `${idx}: ${i.name || 'Unnamed'} (${i.manufacturer || 'Unknown'})`);
+
+      const wantsUsb = confirm(
+        `USB MIDI ports detected:\n\nOutputs:\n${outNames.join('\n') || '(none)'}\n\nInputs:\n${inNames.join('\n') || '(none)'}\n\nConnect via USB MIDI?`
+      );
+      if (!wantsUsb) {
+        log('User declined USB MIDI connection.');
+        return false;
+      }
+
+      // Select output
+      if (outputs.length > 0) {
+        let selectedOut = outputs[0];
+        if (outputs.length > 1) {
+          const idxStr = prompt(`Select USB output index:\n${outNames.join('\n')}\n\nEnter a number:`, '0');
+          const idx = Number(idxStr);
+          if (Number.isInteger(idx) && idx >= 0 && idx < outputs.length) {
+            selectedOut = outputs[idx];
+          } else {
+            log('Invalid output selection; defaulting to first USB output.');
+          }
+        }
+        midiOut = selectedOut;
+        log(`Connected USB output: ${midiOut.name || 'Unnamed'} (${midiOut.manufacturer || 'Unknown'})`);
+      }
+
+      // Select input (to receive/log)
+      if (inputs.length > 0) {
+        // Prefer matching by name to the chosen output
+        let selectedIn = inputs.find(i => midiOut && i.name === midiOut.name) || inputs[0];
+        if (inputs.length > 1) {
+          const idxStrIn = prompt(`Select USB input index:\n${inNames.join('\n')}\n\nEnter a number:`, '0');
+          const idxIn = Number(idxStrIn);
+          if (Number.isInteger(idxIn) && idxIn >= 0 && idxIn < inputs.length) {
+            selectedIn = inputs[idxIn];
+          } else {
+            log('Invalid input selection; defaulting to preferred USB input.');
+          }
+        }
+        midiIn = selectedIn;
+        midiIn.addEventListener('midimessage', onUsbMidiMessage);
+        log(`Connected USB input: ${midiIn.name || 'Unnamed'} (${midiIn.manufacturer || 'Unknown'})`);
+      }
+
+      const deviceLabelParts = [];
+      if (midiOut) deviceLabelParts.push(`USB OUT: ${midiOut.name || '(Unnamed)'}`);
+      if (midiIn)  deviceLabelParts.push(`USB IN: ${midiIn.name || '(Unnamed)'}`);
+      document.getElementById('deviceInfo').textContent = `Device: ${deviceLabelParts.join(' | ')}`;
+
+      return !!midiOut || !!midiIn;
+    }
+
+    function onUsbMidiMessage(event) {
+      const data = event.data; // Uint8Array
+      const hex  = toHex(data);
+      const decoded = decodeMidiMessage(data);
+      log(`RX (USB): ${hex}  |  ${decoded}`);
+    }
+
+    function disconnectUsb() {
+      if (midiIn) {
+        try {
+          midiIn.removeEventListener('midimessage', onUsbMidiMessage);
+        } catch (e) {}
+        log('Releasing USB MIDI input.');
+        midiIn = null;
+      }
+      if (midiOut) {
+        log('Releasing USB MIDI output.');
+        midiOut = null;
+      }
+    }
+
+    // --- BLE Connection Management ---
+    async function connectBle() {
+      if (!navigator.bluetooth) {
+        alert('Web Bluetooth API not supported in this browser.');
+        return false;
+      }
+      try {
+        log('Requesting BLE MIDI device…');
+        bleDevice = await navigator.bluetooth.requestDevice({
+          filters: [{ services: [MIDI_SERVICE_UUID] }],
+        });
+        bleDevice.addEventListener('gattserverdisconnected', onBleDisconnected);
+
+        log(`Connecting to GATT server of "${bleDevice.name || 'Unnamed device'}"…`);
+        bleServer = await bleDevice.gatt.connect();
+
+        log('Getting BLE-MIDI service…');
+        bleMidiService = await bleServer.getPrimaryService(MIDI_SERVICE_UUID);
+
+        log('Getting MIDI Data I/O characteristic…');
+        bleMidiChar = await bleMidiService.getCharacteristic(MIDI_CHAR_UUID);
+
+        try {
+          await bleMidiChar.startNotifications();
+          bleMidiChar.addEventListener('characteristicvaluechanged', handleIncomingBle);
+          log('BLE notifications started (listening for incoming BLE-MIDI).');
+        } catch (e) {
+          log('Could not start BLE notifications: ' + e.message);
+        }
+
+        document.getElementById('deviceInfo').textContent =
+          `Device: BLE MIDI – ${bleDevice.name || '(Unnamed)'} – ID: ${bleDevice.id || '(n/a)'}`;
+        log('BLE connected. Ready to send/receive MIDI.');
+        return true;
+      } catch (err) {
+        log('BLE connection error: ' + err.message);
+        cleanupBle();
+        return false;
+      }
+    }
+
+    async function disconnectBle() {
+      try {
+        if (bleDevice && bleDevice.gatt.connected) {
+          log('Disconnecting BLE…');
+          bleDevice.gatt.disconnect();
+        }
+      } catch (err) {
+        log('BLE disconnect error: ' + err.message);
+      } finally {
+        cleanupBle();
+        log('BLE disconnected.');
+      }
+    }
+
+    function onBleDisconnected() {
+      log('BLE device disconnected.');
+      cleanupBle();
+      setUIConnected(anyConnected());
+    }
+
+    function cleanupBle() {
+      bleMidiChar = null;
+      bleMidiService = null;
+      bleServer = null;
+      inBleSysEx = false;
+      bleSysExBuffer = null;
+      // Keep bleDevice reference to allow reconnection from UI if desired.
+    }
+
+    // --- Unified Connect / Disconnect Flow ---
+    async function onConnect() {
+      // Step 1: Try USB; if user cancels, fall back to BLE
+      const usbConnected = await tryConnectUsb();
+      if (!usbConnected) {
+        const bleConnected = await connectBle();
+        if (!bleConnected) {
+          setUIConnected(false);
+          return;
+        }
+      }
+      setUIConnected(true);
+    }
+
+    async function onDisconnect() {
+      // Disconnect both paths (where applicable)
+      await disconnectBle();
+      disconnectUsb();
+      document.getElementById('deviceInfo').textContent = 'Device: (none)';
+      setUIConnected(false);
+    }
+
+    // --- THR10-II Activation ---
+    const thr10iiSequenceHex = [
+      // 1) UNIVERSAL_SYSEX Identity Request, non real time
+      'f0 7E 7F 06 01 f7',
+      // 2) Ask Firmware Version (00-variant)
+      'f0 00 01 0c 24 01 4d 00 00 00 00 07 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 f7',
+      // 3) Header for sending magic key (4-Bytes frame follows!)
+      'f0 00 01 0c 24 01 4d 00 01 00 00 07 00 04 00 00 00 04 00 00 00 00 00 00 00 00 00 00 f7',
+      // 4) 1.43.0b body with magic key
+      'f0 00 01 0c 24 01 4d 00 02 00 00 03 28 72 4d 54 5d 00 00 00 f7'
+    ];
+
+    async function activateThr10ii() {
+      try {
+        if (!anyConnected()) throw new Error('Connect a USB or BLE MIDI device first.');
+        log('Starting THR10-II activation sequence…');
+
+        for (let i = 0; i < thr10iiSequenceHex.length; i++) {
+          const syx = parseSysExHex(thr10iiSequenceHex[i]);
+          log(`TX (THR10-II step ${i+1}/${thr10iiSequenceHex.length}): ${toHex(syx)}`);
+          await sendMidiUniversal(syx);
+          await sleep(500); // wait 0.5 sec before next message
+        }
+
+        log('THR10-II activation sequence completed.');
+      } catch (err) {
+        log('THR10-II activation error: ' + err.message);
+      }
+    }
+
+    async function switchThrPreset(preset) {
+      try {
+        if (!anyConnected()) throw new Error('Connect a USB or BLE MIDI device first.');
+        const presetNum = Math.max(0, Math.min(4, Number(preset)));
+        const presetHex = presetNum.toString(16).padStart(2, '0');
+        const hex = `f000010c24014d0108000e0b000e0000000400000000 ${presetHex} 0000000000f7`;
+        const syx = parseSysExHex(hex);
+        log(`TX (THR preset ${presetNum + 1}): ${toHex(syx)}`);
+        await sendMidiUniversal(syx);
+        log(`THR preset ${presetNum + 1} command sent.`);
+      } catch (err) {
+        log('THR preset switch error: ' + err.message);
+      }
+    }
+
+    // --- Send UI Event Handlers ---
+    document.getElementById('btnConnect').addEventListener('click', onConnect);
+    document.getElementById('btnDisconnect').addEventListener('click', onDisconnect);
+
+    document.getElementById('btnSendPC').addEventListener('click', async () => {
+      const channel = document.getElementById('pc_channel').value;
+      const program = document.getElementById('pc_program').value;
+      try {
+        const midi = makeProgramChange(channel, program);
+        log(`TX (MIDI PC): ${toHex(midi)}  |  ch=${channel}, program=${program}`);
+        await sendMidiUniversal(midi);
+        log('Program Change sent.');
+      } catch (err) {
+        log('Send PC error: ' + err.message);
+      }
+    });
+
+    document.getElementById('btnSendCC').addEventListener('click', async () => {
+      const channel    = document.getElementById('cc_channel').value;
+      const controller = document.getElementById('cc_controller').value;
+      const value      = document.getElementById('cc_value').value;
+      try {
+        const midi = makeControlChange(channel, controller, value);
+        log(`TX (MIDI CC): ${toHex(midi)}  |  ch=${channel}, cc=${controller}, val=${value}`);
+        await sendMidiUniversal(midi);
+        log('Control Change sent.');
+      } catch (err) {
+        log('Send CC error: ' + err.message);
+      }
+    });
+
+    document.getElementById('btnSendSysEx').addEventListener('click', async () => {
+      const hexStr = document.getElementById('sysex_hex').value || '';
+      try {
+        const syx = parseSysExHex(hexStr);
+        log(`TX (SysEx): ${toHex(syx)}  |  len=${syx.length}`);
+        await sendMidiUniversal(syx);
+        log('SysEx sent.');
+      } catch (err) {
+        log('Send SysEx error: ' + err.message);
+      }
+    });
+
+    document.getElementById('btnActivateThr10ii').addEventListener('click', activateThr10ii);
+    document.querySelectorAll('.btnThrPreset').forEach(btn => {
+      btn.addEventListener('click', () => switchThrPreset(btn.dataset.preset));
+    });
+
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch(err => {
+          log('Service worker registration failed: ' + err.message);
+        });
+      });
+    }
+  </script>
+</body>
+</html>
