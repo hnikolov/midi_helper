@@ -213,6 +213,10 @@
       return isUsbConnected() || isBleConnected();
     }
 
+    function isUserCancellationError(err) {
+      return !!err && (err.name === 'NotFoundError' || err.name === 'AbortError');
+    }
+
     // --- Utilities ---
     function toHex(bytes) {
       return [...bytes].map(b => b.toString(16).padStart(2, '0')).join(' ');
@@ -371,17 +375,54 @@
     }
 
     // --- USB (Web MIDI) Connection & Input Logging ---
+    async function requestUsbMidiPermissionHint() {
+      if (!navigator.usb || typeof navigator.usb.requestDevice !== 'function') {
+        return { prompted: false, cancelled: false };
+      }
+
+      try {
+        const granted = await navigator.usb.getDevices();
+        if (granted.length > 0) {
+          log(`USB devices already granted: ${granted.map(d => d.productName || 'Unnamed USB device').join(' | ')}`);
+          return { prompted: false, cancelled: false };
+        }
+
+        log('Requesting USB MIDI device permission…');
+        const picked = await navigator.usb.requestDevice({
+          filters: [{ classCode: 0x01, subclassCode: 0x03 }],
+        });
+        log(`USB chooser selected: ${picked.productName || 'Unnamed USB device'}`);
+        return { prompted: true, cancelled: false };
+      } catch (err) {
+        if (isUserCancellationError(err)) {
+          log('USB chooser canceled by user.');
+          return { prompted: true, cancelled: true };
+        }
+        log('USB chooser did not complete: ' + err.message);
+        return { prompted: true, cancelled: false };
+      }
+    }
+
     async function tryConnectUsb() {
       if (!navigator.requestMIDIAccess) {
         log('Web MIDI API not supported in this browser.');
-        return false;
+        return { connected: false, cancelled: false };
       }
+
+      // On Android/Chrome, priming USB permission can help make USB MIDI devices
+      // visible to Web MIDI after a user gesture.
+      const usbPermission = await requestUsbMidiPermissionHint();
+      if (usbPermission.cancelled) {
+        disconnectUsb();
+        return { connected: false, cancelled: true };
+      }
+
       try {
         // Request MIDI, including SysEx permission
         midiAccess = await navigator.requestMIDIAccess({ sysex: true });
       } catch (e) {
         log('Web MIDI access denied or failed: ' + e.message);
-        return false;
+        return { connected: false, cancelled: false };
       }
 
       const outputs = Array.from(midiAccess.outputs.values());
@@ -395,26 +436,29 @@
       }
 
       if (outputs.length === 0 && inputs.length === 0) {
-        return false;
+        disconnectUsb();
+        return { connected: false, cancelled: false };
       }
 
-      // Ask the user if they want to connect via USB
       const outNames = outputs.map((o, idx) => `${idx}: ${o.name || 'Unnamed'} (${o.manufacturer || 'Unknown'})`);
       const inNames  = inputs.map((i, idx)  => `${idx}: ${i.name || 'Unnamed'} (${i.manufacturer || 'Unknown'})`);
 
-      const wantsUsb = confirm(
-        `USB MIDI ports detected:\n\nOutputs:\n${outNames.join('\n') || '(none)'}\n\nInputs:\n${inNames.join('\n') || '(none)'}\n\nConnect via USB MIDI?`
-      );
-      if (!wantsUsb) {
-        log('User declined USB MIDI connection.');
-        return false;
-      }
+      log(`USB MIDI outputs found: ${outNames.join(' | ') || '(none)'}`);
+      log(`USB MIDI inputs found: ${inNames.join(' | ') || '(none)'}`);
 
       // Select output
       if (outputs.length > 0) {
         let selectedOut = outputs[0];
         if (outputs.length > 1) {
-          const idxStr = prompt(`Select USB output index:\n${outNames.join('\n')}\n\nEnter a number:`, '0');
+          const idxStr = prompt(
+            `USB MIDI outputs:\n${outNames.join('\n')}\n\nSelect output index (Cancel to stop USB connect):`,
+            '0'
+          );
+          if (idxStr === null) {
+            log('User canceled USB output selection.');
+            disconnectUsb();
+            return { connected: false, cancelled: true };
+          }
           const idx = Number(idxStr);
           if (Number.isInteger(idx) && idx >= 0 && idx < outputs.length) {
             selectedOut = outputs[idx];
@@ -431,7 +475,15 @@
         // Prefer matching by name to the chosen output
         let selectedIn = inputs.find(i => midiOut && i.name === midiOut.name) || inputs[0];
         if (inputs.length > 1) {
-          const idxStrIn = prompt(`Select USB input index:\n${inNames.join('\n')}\n\nEnter a number:`, '0');
+          const idxStrIn = prompt(
+            `USB MIDI inputs:\n${inNames.join('\n')}\n\nSelect input index (Cancel to stop USB connect):`,
+            '0'
+          );
+          if (idxStrIn === null) {
+            log('User canceled USB input selection.');
+            disconnectUsb();
+            return { connected: false, cancelled: true };
+          }
           const idxIn = Number(idxStrIn);
           if (Number.isInteger(idxIn) && idxIn >= 0 && idxIn < inputs.length) {
             selectedIn = inputs[idxIn];
@@ -449,7 +501,7 @@
       if (midiIn)  deviceLabelParts.push(`USB IN: ${midiIn.name || '(Unnamed)'}`);
       document.getElementById('deviceInfo').textContent = `Device: ${deviceLabelParts.join(' | ')}`;
 
-      return !!midiOut || !!midiIn;
+      return { connected: !!midiOut || !!midiIn, cancelled: false };
     }
 
     function onUsbMidiMessage(event) {
@@ -476,8 +528,8 @@
     // --- BLE Connection Management ---
     async function connectBle() {
       if (!navigator.bluetooth) {
-        alert('Web Bluetooth API not supported in this browser.');
-        return false;
+        log('Web Bluetooth API not supported in this browser.');
+        return { connected: false, cancelled: false };
       }
       try {
         log('Requesting BLE MIDI device…');
@@ -506,11 +558,16 @@
         document.getElementById('deviceInfo').textContent =
           `Device: BLE MIDI – ${bleDevice.name || '(Unnamed)'} – ID: ${bleDevice.id || '(n/a)'}`;
         log('BLE connected. Ready to send/receive MIDI.');
-        return true;
+        return { connected: true, cancelled: false };
       } catch (err) {
+        if (isUserCancellationError(err)) {
+          log('BLE chooser canceled by user.');
+          cleanupBle();
+          return { connected: false, cancelled: true };
+        }
         log('BLE connection error: ' + err.message);
         cleanupBle();
-        return false;
+        return { connected: false, cancelled: false };
       }
     }
 
@@ -545,14 +602,28 @@
 
     // --- Unified Connect / Disconnect Flow ---
     async function onConnect() {
-      // Step 1: Try USB; if user cancels, fall back to BLE
-      const usbConnected = await tryConnectUsb();
-      if (!usbConnected) {
-        const bleConnected = await connectBle();
-        if (!bleConnected) {
-          setUIConnected(false);
-          return;
+      // Flow:
+      // 1) Show BLE chooser first.
+      // 2) If BLE is canceled or not connected, check/list USB and connect there.
+      const bleResult = await connectBle();
+      if (bleResult.connected) {
+        setUIConnected(true);
+        return;
+      }
+
+      if (bleResult.cancelled) {
+        log('BLE canceled. Falling back to USB MIDI.');
+      } else {
+        log('BLE not connected. Falling back to USB MIDI.');
+      }
+
+      const usbResult = await tryConnectUsb();
+      if (!usbResult.connected) {
+        if (usbResult.cancelled) {
+          log('USB connection canceled by user.');
         }
+        setUIConnected(false);
+        return;
       }
       setUIConnected(true);
     }
