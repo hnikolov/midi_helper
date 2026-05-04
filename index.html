@@ -47,7 +47,7 @@
   </style>
 </head>
 <body>
-  <h1>MIDI (USB/BLE) – PC, CC & SysEx Sender/Logger, v1</h1>
+  <h1>MIDI (USB/BLE) Helper, v1.1</h1>
 
   <div class="row">
     <button id="btnConnect">Connect</button>
@@ -283,11 +283,9 @@
         const chunk = midiBytes.slice(i, i + chunkPayloadSize);
         const packet = buildBleMidiPacket(chunk);
         if (typeof bleMidiChar.writeValueWithoutResponse === 'function') {
-          await bleMidiChar.writeValue(packet);
-//          await bleMidiChar.writeValueWithoutResponse(packet);
-        } else {
           await bleMidiChar.writeValueWithoutResponse(packet);
-//          await bleMidiChar.writeValue(packet);
+        } else {
+          await bleMidiChar.writeValue(packet);
         }
       }
     }

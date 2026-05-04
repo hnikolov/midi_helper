@@ -1,4 +1,4 @@
-const CACHE_NAME = 'midi-helper-v1';
+const CACHE_NAME = 'midi-helper-v1.1';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
