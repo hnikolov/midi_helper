@@ -154,6 +154,7 @@
     // SysEx assembly for BLE (can span multiple notifications)
     let bleSysExBuffer = null; // array of bytes
     let inBleSysEx = false;
+    let bleTimestampCounter = 0; // 13-bit rolling counter for BLE-MIDI header
 
     // --- Logger & UI ---
     function log(msg) {
@@ -257,11 +258,16 @@
     }
 
     // --- BLE MIDI Packet Helpers ---
-    function buildBleMidiPacket(midiBytes) {
-      // Timestamp: 13-bit value; we include two timestamp bytes with MSB=1.
-      const ts = Math.floor(performance.now()) % 8192;
+    function getNextBleTimestampBytes() {
+      const ts = bleTimestampCounter;
+      bleTimestampCounter = (bleTimestampCounter + 1) & 0x1FFF;
       const tsHigh = 0x80 | (ts >> 7);
       const tsLow  = 0x80 | (ts & 0x7F);
+      return [tsHigh, tsLow];
+    }
+
+    function buildBleMidiPacket(midiBytes) {
+      const [tsHigh, tsLow] = getNextBleTimestampBytes();
       const packet = new Uint8Array(2 + midiBytes.length);
       packet[0] = tsHigh;
       packet[1] = tsLow;
@@ -270,16 +276,18 @@
     }
 
     // Chunk long MIDI payloads for BLE to avoid MTU issues.
-    async function sendBleChunked(midiBytes, chunkPayloadSize = 20) {
+    async function sendBleChunked(midiBytes, chunkPayloadSize = 200) {
       if (!bleMidiChar) throw new Error('Not connected to BLE MIDI characteristic.');
       // chunkPayloadSize refers to MIDI payload size (excluding the 2 timestamp bytes).
       for (let i = 0; i < midiBytes.length; i += chunkPayloadSize) {
         const chunk = midiBytes.slice(i, i + chunkPayloadSize);
         const packet = buildBleMidiPacket(chunk);
         if (typeof bleMidiChar.writeValueWithoutResponse === 'function') {
-          await bleMidiChar.writeValueWithoutResponse(packet);
-        } else {
           await bleMidiChar.writeValue(packet);
+//          await bleMidiChar.writeValueWithoutResponse(packet);
+        } else {
+          await bleMidiChar.writeValueWithoutResponse(packet);
+//          await bleMidiChar.writeValue(packet);
         }
       }
     }
@@ -308,9 +316,9 @@
       for (let i = 0; i < cleaned.length; i += 2) {
         bytes[i / 2] = parseInt(cleaned.slice(i, i + 2), 16);
       }
-      if (bytes.length < 2 || bytes[0] !== 0xF0 || bytes[bytes.length - 1] !== 0xF7) {
-        throw new Error('SysEx must start with F0 and end with F7.');
-      }
+//      if (bytes.length < 2 || bytes[0] !== 0xF0 || bytes[bytes.length - 1] !== 0xF7) {
+//        throw new Error('SysEx must start with F0 and end with F7.');
+//      }
       return bytes;
     }
 
